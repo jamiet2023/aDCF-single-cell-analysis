@@ -95,6 +95,12 @@ Tcells_only <- subset(subset_harmonized, first.labels %in%  c('T_cell:CD4+', 'T_
 Tcells_only <- RunUMAP(Tcells_only, dims = 1:50, reduction = "pca", reduction.name = "umap.unintegrated")
 
 DimPlot(Tcells_only, group.by = 'first.labels', label = TRUE, repel = TRUE) + NoLegend()
+
+#calculate cell counts for T cell subgroups
+cell.counts <- table(Tcells_only@meta.data$first.labels, Tcells_only@meta.data$response)
+cell.counts_DF <- as.data.frame(cell.counts)
+
+
 #differential gene expression using pseudobulk via Seurat for T cell subpopulations
 
 Idents(Tcells_only) <- c('first.labels')
@@ -138,8 +144,22 @@ top8 <- marker_8gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log
 top9 <- marker_9gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
 top10 <- marker_10gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
 top11 <- marker_11gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+
 #create a heat map 
 DoHeatmap(subset(select_Tcells_only, downsample = 100), features = c('AGR2', 'JUND', 'DDX3Y', 'HSP90AA1', 'FOSB', 'KLF6', 'MALAT1', 'JUN', 'BRD2', 'FOS', 'MYADAM', 'NKTR', 'CD44', 'TNF', 'LCN2', 'HSP90AB1', 'CXCR4', 'ANKRD12', 'TNFAIP3', 'PTPRC', 'GZMA', 'CD69', 'AHNAK', 'MIF','ITGA4'), size = 3, group.by = 'orig.ident', assay = 'SCT', label = TRUE) + theme(axis.title.x.right = element_text(size = 10)) + theme(legend.position = 'none')
 dot plot of top DEG among each cohort
 DotPlot(select_Tcells_only, features = c('AGR2', 'JUND', 'DDX3Y', 'HSP90AA1', 'FOSB', 'KLF6', 'MALAT1', 'JUN', 'BRD2', 'FOS', 'MYADAM', 'NKTR', 'CD44', 'TNF', 'LCN2', 'HSP90AB1', 'CXCR4', 'ANKRD12', 'TNFAIP3', 'PTPRC', 'GZMA', 'CD69', 'AHNAK', 'MIF','ITGA4'), group.by = 'first.labels.response', dot.scale = 8, cols = c('black', 'red')) + RotatedAxis() + scale_colour_gradient2(low="steelblue", mid="lightgrey", high="darkgoldenrod1")
+
+#create barplots:
+library(dittoSeq)
+boxplotTcells <- subset(CD8_cells, first.labels %in% c('T_cell:CD8+_Central_memory', 'T_cell:gamma-delta', 'T_cell:CD4+_central_memory', 'T_cell:CD8+_effector_memory_RA'))
+Idents(boxplotTcells) <- c("first.labels")
+boxplotTcells$response.fine.labels <- paste(Idents(boxplotTcells), boxplotTcells$response, sep="_")
+dittoBarPlot(boxplotTcells, var = 'response', group.by = 'fine.labels')
+
+
+
+
+
+
 
