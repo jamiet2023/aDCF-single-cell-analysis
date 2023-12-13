@@ -1,0 +1,147 @@
+mDCF work flow v2
+James Tankel
+2023-09-26
+library(dplyr)
+library(patchwork)
+library(sctransform)
+library(remotes)
+library(Seurat)
+library(ggplot2)
+library(SingleCellExperiment)
+library(SingleR)
+library(harmony)
+library(DoubletFinder)
+library(showtext) 
+#load in data 
+alldata <- readRDS('alldata.mDCF.RDS')
+
+PercentageFeatureSet(alldata,pattern="^MT-") -> alldata$percent.MT
+VlnPlot(alldata, features = c("nFeature_RNA", "nCount_RNA", "percent.MT"))
+
+#preform basic filtering 
+
+alldata <- subset(alldata, nFeature_RNA > 100 & nFeature_RNA <4000 & percent.MT <25 )
+alldata <- SCTransform(alldata)
+alldata <- RunPCA(alldata, npcs = 50)
+
+#label the cells ready for the UMAP 
+cell.ref <- celldex::HumanPrimaryCellAtlasData()
+
+marker.results <- SingleR(test = as.SingleCellExperiment(alldata), ref = cell.ref, labels = cell.ref$label.fine, useNames = TRUE)
+
+markers.results.nonfine <- SingleR(test = as.SingleCellExperiment(alldata), ref = cell.ref, labels = cell.ref$label, useNames = TRUE )
+
+alldata$first.labels <- marker.results$first.labels
+
+#integrate with harmony
+harmonized.seurat <- RunHarmony((alldata.nonfine), group.by.vars = c('orig.ident'), project.dim = FALSE)
+
+harmonized.seurat@reductions
+
+harmonized.seurat <- harmonized.seurat %>%
+  RunUMAP(reduction = 'harmony', dims = 1:20) %>%
+  FindNeighbors(reduction = 'harmony', dims = 1:20) %>%
+  FindClusters(resolution = 0.4)
+
+#identify doublets
+param.sweep.harmony <- paramSweep_v3(harmonized.seurat, PCs = 1:20, sct = TRUE)
+summary.sweep.harmony <- summarizeSweep(param.sweep.harmony, GT = FALSE)
+bcmvn <- find.pK(summary.sweep.harmony)
+
+ggplot(bcmvn, aes(pK, BCmetric, group = 1))+
+  geom_point() +
+  geom_line ()
+
+#optimal pK is 0.01
+pK <- bcmvn %>%
+  filter(BCmetric == max(BCmetric)) %>%
+  dplyr:: select(pK) 
+pK <- as.numeric(as.character(pK[[1]]))
+
+## Homotypic Doublet Proportion Estimat
+annotations <- harmonized.seurat@meta.data$seurat_clusters
+homotypic.prop <- modelHomotypic(annotations)
+nExp_poi <- round(0.076*nrow(harmonized.seurat@meta.data))
+## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+# run doubletFinder 
+harmonized.seurat <- doubletFinder_v3(harmonized.seurat, 
+                                      PCs = 1:20, 
+                                      pN = 0.25, 
+                                      pK = pK, 
+                                      nExp = nExp_poi.adj,
+                                      reuse.pANN = FALSE, sct = TRUE)
+
+#select only singlets from harmonized.seurat 
+Idents(harmonized.seurat) <- 'DF.classifications_0.25_0.01_3451'
+cell_value <- 'Singlet'
+harmonized.seurat.singlets <- subset(harmonized.seurat, idents = cell_value, invert = FALSE)
+
+#subset the data that we want
+subset_harmonized <- subset(harmonized.seurat.singlets, orig.ident %in% c('sample_1', 'sample_5', "sample_8", "sample_12", "sample_13", 'sample_16', 'sample_3', 'sample_4', 'sample_17', "sample_15"))
+
+#allocate patients to predetermined groups
+poor_response_pre_samples <- c('sample_1', 'sample_5', "sample_8", "sample_12", "sample_13", 'sample_16')
+not_poor_response_pre_samples <- c('sample_3', 'sample_4', 'sample_17', "sample_15")
+subset_harmonized@meta.data$response <- sapply(subset_harmonized@meta.data$orig.ident, function(ita) ifelse(ita %in% poor_response_pre_samples,"poor_response_pre_samples","not_poor_response_pre_samples"))
+
+# create umap using harmonized data
+DimPlot(subset_harmonized, group.by = 'first.labels', reduction = 'umap', label = TRUE, repel = TRUE) +NoLegend()
+
+#create a Umap of all different T cell subtypes
+#subset the t cell subgroups only 
+Tcells_only <- subset(subset_harmonized, first.labels %in%  c('T_cell:CD4+', 'T_cell:CD4+_central_memory', 'T_cell:CD4+_effector_memory', 'T_cell:CD4+_Naive', 'T_cell:CD8+', 'T_cell:CD8+', 'T_cell:CD8+_Central_memory', 'T_Cell:CD8+_effector_memory', 'T_cell:CD8+_effector_memory_RA', 'T_cell:CD8+_effectot_memory_RA', 'T_cell:CD8+_naive', 'T_cell:gamma-delta', 'T_cell:Treg:Naive'))
+
+#umap for the t cell subgroups 
+Tcells_only <- RunUMAP(Tcells_only, dims = 1:50, reduction = "pca", reduction.name = "umap.unintegrated")
+
+DimPlot(Tcells_only, group.by = 'first.labels', label = TRUE, repel = TRUE) + NoLegend()
+#differential gene expression using pseudobulk via Seurat for T cell subpopulations
+
+Idents(Tcells_only) <- c('first.labels')
+marker_1 <- subset(Tcells_only, idents = 'T_cell:CD4+')
+marker_2 <- subset(Tcells_only, idents = 'T_cell:CD4+_central_memory')
+marker_3 <- subset(Tcells_only, idents = 'T_cell:CD4+_effector_memory')
+marker_4 <- subset(Tcells_only, idents = 'T_cell:CD4+_Naive')
+marker_5 <- subset(Tcells_only, idents = 'T_cell:CD8+')
+marker_6 <- subset(Tcells_only, idents = 'T_cell:CD8+_Central_memory' )
+marker_8 <- subset(Tcells_only, idents = 'T_cell:CD8+_effector_memory_RA')
+marker_9 <- subset(Tcells_only, idents = 'T_cell:CD8+_naive')
+marker_10 <- subset(Tcells_only, idents = 'T_cell:gamma-delta')
+marker_11 <- subset(Tcells_only, idents = 'T_cell:Treg:Naive')
+
+#identify top DEG among each cohort
+Idents(marker_2) <- 'response'
+marker_2gene <- FindMarkers(marker_2, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_3) <- 'response'
+marker_3gene <- FindMarkers(marker_3, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_4) <- 'response'
+marker_4gene <- FindMarkers(marker_4, ident.1 = 'not_poor_response_pre_samples', ident.2 = 'poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_5) <- 'response'
+marker_5gene <- FindMarkers(marker_5, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_6) <- 'response'
+marker_6gene <- FindMarkers(marker_6, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_8) <- 'response'
+marker_8gene <- FindMarkers(marker_8, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_9) <- 'response'
+marker_9gene <- FindMarkers(marker_9, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_10) <- 'response'
+marker_10gene <- FindMarkers(marker_10, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+Idents(marker_11) <- 'response'
+marker_11gene <- FindMarkers(marker_11, ident.1 = 'poor_response_pre_samples', ident.2 = 'not_poor_response_pre_samples', test.use = "DESeq2", assay = 'RNA')
+
+top2 <- marker_2gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top3 <- marker_3gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top4 <- marker_4gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top5 <- marker_5gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top6 <- marker_6gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top8 <- marker_8gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top9 <- marker_9gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top10 <- marker_10gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+top11 <- marker_11gene %>% filter(p_val_adj <= 0.05) %>% top_n(n = 5, wt = avg_log2FC)
+#create a heat map 
+DoHeatmap(subset(select_Tcells_only, downsample = 100), features = c('AGR2', 'JUND', 'DDX3Y', 'HSP90AA1', 'FOSB', 'KLF6', 'MALAT1', 'JUN', 'BRD2', 'FOS', 'MYADAM', 'NKTR', 'CD44', 'TNF', 'LCN2', 'HSP90AB1', 'CXCR4', 'ANKRD12', 'TNFAIP3', 'PTPRC', 'GZMA', 'CD69', 'AHNAK', 'MIF','ITGA4'), size = 3, group.by = 'orig.ident', assay = 'SCT', label = TRUE) + theme(axis.title.x.right = element_text(size = 10)) + theme(legend.position = 'none')
+dot plot of top DEG among each cohort
+DotPlot(select_Tcells_only, features = c('AGR2', 'JUND', 'DDX3Y', 'HSP90AA1', 'FOSB', 'KLF6', 'MALAT1', 'JUN', 'BRD2', 'FOS', 'MYADAM', 'NKTR', 'CD44', 'TNF', 'LCN2', 'HSP90AB1', 'CXCR4', 'ANKRD12', 'TNFAIP3', 'PTPRC', 'GZMA', 'CD69', 'AHNAK', 'MIF','ITGA4'), group.by = 'first.labels.response', dot.scale = 8, cols = c('black', 'red')) + RotatedAxis() + scale_colour_gradient2(low="steelblue", mid="lightgrey", high="darkgoldenrod1")
+
